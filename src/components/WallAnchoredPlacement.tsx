@@ -8,6 +8,7 @@ import { getCatalogItem } from "@/lib/catalog";
 import { computeWallAnchoredPlacement, getWallSegment } from "@/lib/placement";
 import { getThemeMaterials, ModelInstance } from "./CabinetModel";
 import { getCustomMaterialPreset } from "@/lib/customMaterials";
+import { registerObject } from "@/lib/three/measureRegistry";
 import type { Vec2 } from "@/lib/geometry";
 
 const PREVIEW_COLOR = "#22d3ee";
@@ -103,12 +104,16 @@ function PlacedItemMesh({ item }: { item: PlacedItem }) {
 
   return (
     <group position={pos} rotation={[0, item.rotationY, 0]} onClick={handleClick}>
-      <ModelInstance
-        url={catalog.model}
-        width={itemWidth}
-        standardWidth={catalog.standardWidth}
-        material={material}
-      />
+      {/* Phase 4A: committed item root registered for on-demand measurement.
+          Wrapped around ONLY the GLB so the selection wireframe is excluded. */}
+      <group ref={(el) => registerObject(item.id, el)}>
+        <ModelInstance
+          url={catalog.model}
+          width={itemWidth}
+          standardWidth={catalog.standardWidth}
+          material={material}
+        />
+      </group>
       {isSelected && (
         <mesh position={[0, 0, 0]}>
           <boxGeometry args={[itemWidth + 0.05, itemHeight + 0.05, itemDepth + 0.05]} />

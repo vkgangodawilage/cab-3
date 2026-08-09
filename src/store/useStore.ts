@@ -21,6 +21,9 @@ import { clampOpeningCenter } from "@/lib/cutouts";
 import { ROOM_HEIGHT } from "@/constants/dimensions";
 import type { BomRates } from "@/utils/costCalculator";
 import { DEFAULT_BOM_RATES } from "@/utils/costCalculator";
+import { runBlockedSegmentsWithCorners } from "@/lib/planning/adapters";
+import { validateGhost } from "@/lib/planning/ghostModel";
+import type { VerificationResult } from "@/lib/planning/planVerification";
 
 export type Tool = "select" | "wall" | "kitchen" | "eraser";
 export type CameraMode = "2d" | "3d";
@@ -183,6 +186,27 @@ export interface DesignerState {
   finishActive: () => void;
   /** Confirm the current multi-segment path and stop drawing (double-click). */
   finishDrawing: () => void;
+  /**
+   * Commit the active ghost run/wall after validation. Blocks (returns false)
+   * when corner ownership reports a hard error; the ghost stays previewable.
+   */
+  commitActive: () => boolean;
+  /** Phase 2 commit-validation result (null = no failed attempt pending). */
+  lastValidation: { valid: boolean; diagnostics: string[] } | null;
+  setLastValidation: (v: { valid: boolean; diagnostics: string[] } | null) => void;
+  /** Phase 3 plan-vs-built verification result (serializable, on-demand). */
+  verification: VerificationResult | null;
+  setVerification: (v: VerificationResult | null) => void;
+  /**
+   * Phase 4C — auto-refresh. `verifyRevision` bumps on every structural change
+   * (commit, undo, delete, edit); the `<AutoVerify />` component debounces and
+   * re-runs verification. `verificationStale` marks the debounce window so an
+   * old result is never presented as current.
+   */
+  verifyRevision: number;
+  verificationStale: boolean;
+  requestVerification: () => void;
+  setVerificationStale: (stale: boolean) => void;
   cancelActive: () => void;
   removeLastPoint: () => void;
   undo: () => void;
@@ -299,6 +323,10 @@ export const useDesigner = create<DesignerState>((set, get) => ({
   ceilingHeight: ROOM_HEIGHT,
   isUiVisible: true,
   isRightPanelOpen: false,
+  lastValidation: null,
+  verification: null,
+  verifyRevision: 0,
+  verificationStale: false,
 
   setTool: (tool) => {
     const s = get();
@@ -369,8 +397,10 @@ export const useDesigner = create<DesignerState>((set, get) => ({
     const s = get();
     const pt = opts?.exact ? raw : s.snap(raw);
 
+    // Phase 2 ghost model: drawing steps never push undo history. A line is
+    // committed (and snapshot once) only on finish/commit; cancelling leaves
+    // no undo entry behind (Part 14).
     if (s.tool === "wall") {
-      pushHistory(set, get);
       if (!s.activeWallId) {
         const wall: Wall = { id: nextId("wall"), points: [pt], closed: false };
         set({
@@ -379,6 +409,7 @@ export const useDesigner = create<DesignerState>((set, get) => ({
           pending: pt,
           typedLength: "",
           lockedVector: null,
+          lastValidation: null,
         });
         return;
       }
@@ -388,6 +419,8 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       const prev = active.points[active.points.length - 1];
       if (dist(pt, prev) < 1e-4) return;
       if (active.points.length >= 3 && dist(pt, first) < CLOSE_DISTANCE) {
+        // Closing the loop commits the wall — one history snapshot.
+        pushHistory(set, get);
         set({
           walls: s.walls.map((w) =>
             w.id === s.activeWallId ? { ...w, closed: true } : w
@@ -396,6 +429,9 @@ export const useDesigner = create<DesignerState>((set, get) => ({
           pending: null,
           typedLength: "",
           lockedVector: null,
+          lastValidation: null,
+          verifyRevision: s.verifyRevision + 1,
+          verificationStale: true,
         });
         return;
       }
@@ -408,7 +444,6 @@ export const useDesigner = create<DesignerState>((set, get) => ({
         lockedVector: null,
       });
     } else if (s.tool === "kitchen") {
-      pushHistory(set, get);
       const active = s.cabinets.find((c) => c.id === s.activeCabinetId);
       if (!active) {
         const run: CabinetRun = { id: nextId("cab"), points: [pt], closed: false };
@@ -418,6 +453,7 @@ export const useDesigner = create<DesignerState>((set, get) => ({
           pending: pt,
           typedLength: "",
           lockedVector: null,
+          lastValidation: null,
         });
         return;
       }
@@ -458,36 +494,48 @@ export const useDesigner = create<DesignerState>((set, get) => ({
   selectCabinet: (id) => set({ selectedCabinetId: id, selectedWallId: null, selectedItemId: null }),
 
   updatePlacedItem: (id, updates) => {
+    const s = get();
     pushHistory(set, get);
     set({
-      placedItems: get().placedItems.map((item) =>
+      placedItems: s.placedItems.map((item) =>
         item.id === id ? { ...item, ...updates } : item
       ),
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
   updateCabinetRun: (id, updates) => {
+    const s = get();
     pushHistory(set, get);
     set({
-      cabinets: get().cabinets.map((cab) =>
+      cabinets: s.cabinets.map((cab) =>
         cab.id === id ? { ...cab, ...updates } : cab
       ),
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
   deletePlacedItem: (id) => {
+    const s = get();
     pushHistory(set, get);
     set({
-      placedItems: get().placedItems.filter((i) => i.id !== id),
-      selectedItemId: get().selectedItemId === id ? null : get().selectedItemId,
+      placedItems: s.placedItems.filter((i) => i.id !== id),
+      selectedItemId: s.selectedItemId === id ? null : s.selectedItemId,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
   deleteCabinetRun: (id) => {
+    const s = get();
     pushHistory(set, get);
     set({
-      cabinets: get().cabinets.filter((c) => c.id !== id),
-      selectedCabinetId: get().selectedCabinetId === id ? null : get().selectedCabinetId,
+      cabinets: s.cabinets.filter((c) => c.id !== id),
+      selectedCabinetId: s.selectedCabinetId === id ? null : s.selectedCabinetId,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
@@ -518,6 +566,8 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       pending: s.activeWallId === parsed.wallId ? null : s.pending,
       selectedWallId: s.selectedWallId === id ? null : s.selectedWallId,
       cutoutPreview: null,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
@@ -547,7 +597,11 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       position: result.position,
       rotationY: result.rotationY,
     };
-    set({ placedItems: [...s.placedItems, placed] });
+    set({
+      placedItems: [...s.placedItems, placed],
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
+    });
   },
 
   setCutoutPreview: (preview) => set({ cutoutPreview: preview }),
@@ -572,7 +626,12 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       height: item.height,
       sillHeight: sill,
     };
-    set({ placedCutouts: [...s.placedCutouts, cutout], cutoutPreview: null });
+    set({
+      placedCutouts: [...s.placedCutouts, cutout],
+      cutoutPreview: null,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
+    });
   },
 
   setBomOpen: (bomOpen) => set({ bomOpen }),
@@ -584,22 +643,89 @@ export const useDesigner = create<DesignerState>((set, get) => ({
   setUiVisible: (isUiVisible) => set({ isUiVisible }),
   setRightPanelOpen: (isRightPanelOpen) => set({ isRightPanelOpen }),
 
-  finishActive: () =>
-    set({ activeWallId: null, activeCabinetId: null, pending: null, typedLength: "", lockedVector: null }),
+  finishActive: () => {
+    const s = get();
+    // Commit point for implicit finishes (tool switch): snapshot once.
+    const committed = !!(s.activeWallId || s.activeCabinetId);
+    if (committed) pushHistory(set, get);
+    set({
+      activeWallId: null,
+      activeCabinetId: null,
+      pending: null,
+      hover: null,
+      typedLength: "",
+      lockedVector: null,
+      lastValidation: null,
+      verifyRevision: committed ? s.verifyRevision + 1 : s.verifyRevision,
+      verificationStale: committed ? true : s.verificationStale,
+    });
+  },
+
+  setLastValidation: (lastValidation) => set({ lastValidation }),
+  setVerification: (verification) => set({ verification }),
+  requestVerification: () =>
+    set((s) => ({ verifyRevision: s.verifyRevision + 1, verificationStale: true })),
+  setVerificationStale: (verificationStale) => set({ verificationStale }),
+
+  commitActive: () => {
+    const s = get();
+    if (s.activeCabinetId) {
+      // Validate the whole ghost plan (cutouts + corner ownership) before
+      // committing. Hard corner errors block the commit so the user can fix
+      // the run while it is still a previewable ghost.
+      const planned = runBlockedSegmentsWithCorners(
+        s.cabinets,
+        s.walls,
+        s.placedCutouts
+      );
+      const validation = validateGhost(planned.cornerDiagnostics);
+      if (!validation.valid) {
+        set({ lastValidation: { valid: false, diagnostics: validation.diagnostics } });
+        return false;
+      }
+      pushHistory(set, get);
+      set({
+        activeCabinetId: null,
+        pending: null,
+        hover: null,
+        typedLength: "",
+        lockedVector: null,
+        lastValidation: null,
+        verifyRevision: s.verifyRevision + 1,
+        verificationStale: true,
+      });
+      return true;
+    }
+    if (s.activeWallId) {
+      pushHistory(set, get);
+      set({
+        activeWallId: null,
+        pending: null,
+        hover: null,
+        typedLength: "",
+        lockedVector: null,
+        lastValidation: null,
+        verifyRevision: s.verifyRevision + 1,
+        verificationStale: true,
+      });
+      return true;
+    }
+    return false;
+  },
 
   finishDrawing: () => {
     const s = get();
     if (s.activeWallId) {
       const wall = s.walls.find((w) => w.id === s.activeWallId);
       if (wall && wall.points.length >= 2) {
-        s.finishActive();
+        s.commitActive();
       } else {
         s.cancelActive();
       }
     } else if (s.activeCabinetId) {
       const run = s.cabinets.find((c) => c.id === s.activeCabinetId);
       if (run && run.points.length >= 2) {
-        s.finishActive();
+        s.commitActive();
       } else {
         s.cancelActive();
       }
@@ -608,14 +734,14 @@ export const useDesigner = create<DesignerState>((set, get) => ({
 
   cancelActive: () => {
     const s = get();
+    // A cancelled ghost must NOT create an undo entry (Part 14).
     const walls = s.activeWallId
       ? s.walls.filter((w) => w.id !== s.activeWallId)
       : s.walls;
     const cabinets = s.activeCabinetId
       ? s.cabinets.filter((c) => c.id !== s.activeCabinetId)
       : s.cabinets;
-    pushHistory(set, get);
-    set({ walls, cabinets, activeWallId: null, activeCabinetId: null, pending: null, hover: null, typedLength: "", lockedVector: null });
+    set({ walls, cabinets, activeWallId: null, activeCabinetId: null, pending: null, hover: null, typedLength: "", lockedVector: null, lastValidation: null });
   },
 
   removeLastPoint: () => {
@@ -624,7 +750,6 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       const active = s.walls.find((w) => w.id === s.activeWallId);
       if (!active || active.points.length === 0) return;
       const points = active.points.slice(0, -1);
-      pushHistory(set, get);
       set({
         walls: points.length
           ? s.walls.map((w) => (w.id === active.id ? { ...w, points } : w))
@@ -640,7 +765,6 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       const active = s.cabinets.find((c) => c.id === s.activeCabinetId);
       if (!active || active.points.length === 0) return;
       const points = active.points.slice(0, -1);
-      pushHistory(set, get);
       set({
         cabinets: points.length
           ? s.cabinets.map((c) => (c.id === active.id ? { ...c, points } : c))
@@ -654,7 +778,8 @@ export const useDesigner = create<DesignerState>((set, get) => ({
   },
 
   undo: () => {
-    const { past } = get();
+    const s = get();
+    const { past } = s;
     if (!past.length) return;
     const prev = past[past.length - 1];
     set({
@@ -667,10 +792,14 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       hover: null,
       typedLength: "",
       lockedVector: null,
+      lastValidation: null,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 
   clearAll: () => {
+    const s = get();
     pushHistory(set, get);
     set({
       walls: [],
@@ -688,6 +817,8 @@ export const useDesigner = create<DesignerState>((set, get) => ({
       placedCutouts: [],
       cutoutPreview: null,
       placementSide: 1,
+      verifyRevision: s.verifyRevision + 1,
+      verificationStale: true,
     });
   },
 }));

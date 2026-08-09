@@ -1,7 +1,12 @@
 "use client";
 
 import { useMemo } from "react";
+import type { Object3D } from "three";
 import type { Vec2 } from "@/lib/geometry";
+import { ENABLE_RHYTHM_PLANNER, MM_TO_M } from "@/lib/planning/config";
+import { complement, clipIntervals, mergeIntervals } from "@/lib/planning/intervals";
+import { solveFacadePlan } from "@/lib/planning/rhythmSolver";
+import type { FacadePlan, IntervalMm } from "@/lib/planning/types";
 import {
   BASE_DEPTH,
   CORNER_MODULE_SIZE,
@@ -69,6 +74,220 @@ export interface RunLayout {
 /** Minimum turn angle (radians) above which an interior corner is detected. */
 const CORNER_TURN_ANGLE = 0.5; // ~29°
 
+/* -------------------------------------------------------------------------- */
+/* Phase 1 planning integration (facade rhythm + wall intervals)              */
+/* -------------------------------------------------------------------------- */
+
+interface SegmentGeo {
+  a: Vec2;
+  d: Vec2;
+  nrm: Vec2;
+  rotY: number;
+}
+
+/**
+ * Convert blocked intervals (mm) into usable sub-spans (metres) within a
+ * segment's available length [0, avail]. Overlapping blocked intervals are
+ * merged so the solver never sees spurious usable gaps.
+ */
+function usableSpansInMeters(
+  availM: number,
+  blockedMm: IntervalMm[]
+): { start: number; end: number }[] {
+  const availMm = Math.round(availM * 1000);
+  const merged = mergeIntervals(clipIntervals(blockedMm, availMm));
+  return complement(merged, availMm).map((g) => ({
+    start: g.start / 1000,
+    end: g.end / 1000,
+  }));
+}
+
+function pushBase(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  t: number,
+  width: number,
+  depth: number,
+  kind: BaseModuleKind
+) {
+  plan.base.push({
+    kind,
+    x: geo.a.x + geo.d.x * (t + width / 2) + geo.nrm.x * (depth / 2),
+    z: geo.a.z + geo.d.z * (t + width / 2) + geo.nrm.z * (depth / 2),
+    rotationY: geo.rotY,
+    width,
+    depth,
+  });
+}
+
+function pushWall(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  t: number,
+  width: number,
+  variant: WallModuleKind
+) {
+  plan.wall.push({
+    x: geo.a.x + geo.d.x * (t + width / 2) + geo.nrm.x * (WALL_CABINET_DEPTH / 2),
+    z: geo.a.z + geo.d.z * (t + width / 2) + geo.nrm.z * (WALL_CABINET_DEPTH / 2),
+    rotationY: geo.rotY,
+    width,
+    variant,
+  });
+}
+
+/**
+ * Original fixed-width subdivision, kept as the deterministic fallback so the
+ * editor never breaks when the rhythm solver reports an invalid span.
+ */
+function legacyBaseFill(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  iv: { start: number; end: number },
+  depth: number,
+  drawerAtStart: boolean,
+  drawerAtEnd: boolean
+) {
+  const avail = iv.end - iv.start;
+  if (avail < 0.02) return;
+  const count = Math.max(Math.floor((avail + 1e-6) / STD_CABINET_WIDTH), 0);
+  let t = iv.start;
+  for (let k = 0; k < count; k++) {
+    const kind: BaseModuleKind =
+      (k === 0 && drawerAtStart) || (k === count - 1 && drawerAtEnd)
+        ? "drawer"
+        : "double-door";
+    pushBase(plan, geo, t, STD_CABINET_WIDTH, depth, kind);
+    t += STD_CABINET_WIDTH;
+  }
+  const rem = iv.end - t;
+  if (rem >= FILLER_MIN_WIDTH) pushBase(plan, geo, t, rem, depth, "filler");
+}
+
+function legacyWallFill(plan: RunLayout, geo: SegmentGeo, iv: { start: number; end: number }) {
+  const avail = iv.end - iv.start;
+  if (avail < 0.02) return;
+  const count = Math.max(Math.floor((avail + 1e-6) / STD_CABINET_WIDTH), 0);
+  let t = iv.start;
+  for (let k = 0; k < count; k++) {
+    pushWall(plan, geo, t, STD_CABINET_WIDTH, k % 2 === 1 ? "glass" : "solid");
+    t += STD_CABINET_WIDTH;
+  }
+  const rem = iv.end - t;
+  if (rem >= FILLER_MIN_WIDTH) pushWall(plan, geo, t, rem, "solid");
+}
+
+/** Emit rhythm-solver modules for one usable base span (mm -> metres). */
+function emitRhythmBase(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  iv: { start: number; end: number },
+  depth: number,
+  solution: FacadePlan,
+  drawerAtStart: boolean,
+  drawerAtEnd: boolean
+) {
+  let t = iv.start;
+  solution.modules.forEach((m, idx) => {
+    const w = m.width * MM_TO_M;
+    const kind: BaseModuleKind =
+      m.kind === "filler"
+        ? "filler"
+        : (idx === 0 && drawerAtStart) || (idx === solution.modules.length - 1 && drawerAtEnd)
+          ? "drawer"
+          : "double-door";
+    pushBase(plan, geo, t, w, depth, kind);
+    t += w;
+  });
+}
+
+/** Emit rhythm-solver modules for one usable wall span (mm -> metres). */
+function emitRhythmWall(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  iv: { start: number; end: number },
+  solution: FacadePlan
+) {
+  let t = iv.start;
+  solution.modules.forEach((m, idx) => {
+    const w = m.width * MM_TO_M;
+    pushWall(
+      plan,
+      geo,
+      t,
+      w,
+      m.kind === "filler" ? "solid" : idx % 2 === 1 ? "glass" : "solid"
+    );
+    t += w;
+  });
+}
+
+/**
+ * Fill one segment layer (base or wall). When `useRhythm` is on and every
+ * usable span closes exactly, the facade rhythm solver determines the widths;
+ * otherwise the legacy fixed-width subdivision fills each usable span.
+ * Cabinets are never emitted inside blocked intervals.
+ */
+function fillLayer(
+  plan: RunLayout,
+  geo: SegmentGeo,
+  avail: number,
+  blockedMm: IntervalMm[],
+  useRhythm: boolean,
+  drawerAtStart: boolean,
+  drawerAtEnd: boolean,
+  layer: "base" | "wall"
+) {
+  const usable =
+    blockedMm.length > 0
+      ? usableSpansInMeters(avail, blockedMm)
+      : [{ start: 0, end: avail }];
+
+  if (layer === "base") {
+    if (useRhythm && usable.length > 0) {
+      const solved = usable.map((iv) =>
+        solveFacadePlan(Math.round((iv.end - iv.start) * 1000))
+      );
+      if (solved.every((s) => s.valid)) {
+        usable.forEach((iv, idx) =>
+          emitRhythmBase(
+            plan,
+            geo,
+            iv,
+            BASE_DEPTH,
+            solved[idx],
+            idx === 0 && drawerAtStart,
+            idx === usable.length - 1 && drawerAtEnd
+          )
+        );
+        return;
+      }
+    }
+    usable.forEach((iv, idx) =>
+      legacyBaseFill(
+        plan,
+        geo,
+        iv,
+        BASE_DEPTH,
+        idx === 0 && drawerAtStart,
+        idx === usable.length - 1 && drawerAtEnd
+      )
+    );
+    return;
+  }
+
+  if (useRhythm && usable.length > 0) {
+    const solved = usable.map((iv) =>
+      solveFacadePlan(Math.round((iv.end - iv.start) * 1000))
+    );
+    if (solved.every((s) => s.valid)) {
+      usable.forEach((iv, idx) => emitRhythmWall(plan, geo, iv, solved[idx]));
+      return;
+    }
+  }
+  usable.forEach((iv) => legacyWallFill(plan, geo, iv));
+}
+
 /**
  * Full parametric plan for a cabinet run polyline:
  *
@@ -81,7 +300,12 @@ const CORNER_TURN_ANGLE = 0.5; // ~29°
  *  - Countertop slabs span each full segment plus a 0.94 m corner tile over
  *    every corner module, so the whole lower run is sealed with no gaps.
  */
-export function planRunLayout(points: Vec2[], isIsland: boolean): RunLayout {
+export function planRunLayout(
+  points: Vec2[],
+  isIsland: boolean,
+  blockedBySegment?: IntervalMm[][] | null,
+  blockedBySegmentTop?: IntervalMm[][] | null
+): RunLayout {
   const plan: RunLayout = {
     base: [],
     wall: [],
@@ -185,39 +409,24 @@ export function planRunLayout(points: Vec2[], isIsland: boolean): RunLayout {
       depth: counterDepth,
     });
 
-    // Base cabinets, trimmed away from each corner module.
+    // Base cabinets, trimmed away from each corner module. Widths come from
+    // the facade rhythm solver (obstacle-aware) when enabled, else the legacy
+    // fixed-width subdivision; both respect the usable wall intervals.
     const st = startTrim[j] ? CORNER_MODULE_SIZE : 0;
     const et = endTrim[j] ? CORNER_MODULE_SIZE : 0;
     const avail = L - st - et;
     if (avail >= 0.02) {
-      const count = Math.max(Math.floor((avail + 1e-6) / STD_CABINET_WIDTH), 0);
-      let t = st;
-      for (let k = 0; k < count; k++) {
-        const kind: BaseModuleKind =
-          (k === 0 && st > 0) || (k === count - 1 && et > 0)
-            ? "drawer"
-            : "double-door";
-        plan.base.push({
-          kind,
-          x: a.x + d.x * (t + STD_CABINET_WIDTH / 2) + nrm.x * (BASE_DEPTH / 2),
-          z: a.z + d.z * (t + STD_CABINET_WIDTH / 2) + nrm.z * (BASE_DEPTH / 2),
-          rotationY: rotY,
-          width: STD_CABINET_WIDTH,
-          depth: BASE_DEPTH,
-        });
-        t += STD_CABINET_WIDTH;
-      }
-      const rem = L - et - t;
-      if (rem >= FILLER_MIN_WIDTH) {
-        plan.base.push({
-          kind: "filler",
-          x: a.x + d.x * (t + rem / 2) + nrm.x * (BASE_DEPTH / 2),
-          z: a.z + d.z * (t + rem / 2) + nrm.z * (BASE_DEPTH / 2),
-          rotationY: rotY,
-          width: rem,
-          depth: BASE_DEPTH,
-        });
-      }
+      const geo: SegmentGeo = { a, d, nrm, rotY };
+      fillLayer(
+        plan,
+        geo,
+        avail,
+        blockedBySegment?.[j] ?? [],
+        ENABLE_RHYTHM_PLANNER && !isIsland,
+        st > 0,
+        et > 0,
+        "base"
+      );
       // Close the gap between the regular base cabinets and the L-corner
       // unit: the corner unit is 0.9m wide but only 0.6m deep, so a slim
       // filler panel (width = CORNER_MODULE_SIZE - BASE_DEPTH = 0.3m) bridges
@@ -255,28 +464,17 @@ export function planRunLayout(points: Vec2[], isIsland: boolean): RunLayout {
     const etW = endTrim[j] ? CORNER_MODULE_SIZE : 0;
     const availW = L - stW - etW;
     if (!isIsland && availW >= 0.02) {
-      const count = Math.max(Math.floor((availW + 1e-6) / STD_CABINET_WIDTH), 0);
-      let t = stW;
-      for (let k = 0; k < count; k++) {
-        plan.wall.push({
-          x: a.x + d.x * (t + STD_CABINET_WIDTH / 2) + nrm.x * (WALL_CABINET_DEPTH / 2),
-          z: a.z + d.z * (t + STD_CABINET_WIDTH / 2) + nrm.z * (WALL_CABINET_DEPTH / 2),
-          rotationY: rotY,
-          width: STD_CABINET_WIDTH,
-          variant: k % 2 === 1 ? "glass" : "solid",
-        });
-        t += STD_CABINET_WIDTH;
-      }
-      const rem = L - etW - t;
-      if (rem >= FILLER_MIN_WIDTH) {
-        plan.wall.push({
-          x: a.x + d.x * (t + rem / 2) + nrm.x * (WALL_CABINET_DEPTH / 2),
-          z: a.z + d.z * (t + rem / 2) + nrm.z * (WALL_CABINET_DEPTH / 2),
-          rotationY: rotY,
-          width: rem,
-          variant: "solid",
-        });
-      }
+      const geo: SegmentGeo = { a, d, nrm, rotY };
+      fillLayer(
+        plan,
+        geo,
+        availW,
+        blockedBySegmentTop?.[j] ?? blockedBySegment?.[j] ?? [],
+        ENABLE_RHYTHM_PLANNER,
+        false,
+        false,
+        "wall"
+      );
       // Filler panels beside the upper corner unit (fills the gap between the
       // 0.9 m base trim and the 0.65 m upper-corner unit on each side).
       const gapW = CORNER_MODULE_SIZE - UPPER_CORNER_MODULE_SIZE; // = 0.25 m
@@ -411,6 +609,8 @@ export function BaseCabinetRun({
   customMaterialId,
   showCounter = true,
   counterTopY,
+  blockedBySegment,
+  onModuleRef,
 }: {
   points: Vec2[];
   isIsland: boolean;
@@ -418,14 +618,21 @@ export function BaseCabinetRun({
   customMaterialId?: string;
   showCounter?: boolean;
   counterTopY?: number;
+  blockedBySegment?: IntervalMm[][] | null;
+  /** Phase 3 measurement hook: (layer, index, root object | null). */
+  onModuleRef?: (layer: "base", index: number, obj: Object3D | null) => void;
 }) {
-  const layout = useMemo(() => planRunLayout(points, isIsland), [points, isIsland]);
+  const layout = useMemo(
+    () => planRunLayout(points, isIsland, blockedBySegment),
+    [points, isIsland, blockedBySegment]
+  );
 
   return (
     <group>
       {layout.base.map((m, i) => (
         <BaseCabinet3D
           key={`b-${i}`}
+          innerRef={(el) => onModuleRef?.("base", i, el)}
           position={[m.x, 0, m.z]}
           rotationY={m.rotationY}
           width={m.width}
@@ -461,6 +668,9 @@ export function WallCabinetRun({
   wallElevation = WALL_CABINET_ELEVATION,
   customMaterialId,
   soffit = false,
+  blockedBySegment,
+  blockedBySegmentTop,
+  onModuleRef,
 }: {
   points: Vec2[];
   isIsland: boolean;
@@ -468,8 +678,15 @@ export function WallCabinetRun({
   wallElevation?: number;
   customMaterialId?: string;
   soffit?: boolean;
+  blockedBySegment?: IntervalMm[][] | null;
+  blockedBySegmentTop?: IntervalMm[][] | null;
+  /** Phase 3 measurement hook: (layer, index, root object | null). */
+  onModuleRef?: (layer: "wall" | "corner", index: number, obj: Object3D | null) => void;
 }) {
-  const layout = useMemo(() => planRunLayout(points, isIsland), [points, isIsland]);
+  const layout = useMemo(
+    () => planRunLayout(points, isIsland, blockedBySegment, blockedBySegmentTop),
+    [points, isIsland, blockedBySegment, blockedBySegmentTop]
+  );
   const ceilingHeight = useDesigner((s) => s.ceilingHeight);
 
   const soffitHeight = soffit
@@ -481,6 +698,7 @@ export function WallCabinetRun({
       {layout.wall.map((p, i) => (
         <WallCabinet3D
           key={`w-${i}`}
+          innerRef={(el) => onModuleRef?.("wall", i, el)}
           position={[p.x, wallElevation, p.z]}
           rotationY={p.rotationY}
           width={p.width}
@@ -493,6 +711,7 @@ export function WallCabinetRun({
       {layout.wallCorners.map((c, i) => (
         <UpperCornerCabinet3D
           key={`wc-${i}`}
+          innerRef={(el) => onModuleRef?.("corner", i, el)}
           position={[c.x, wallElevation, c.z]}
           rotationY={c.rotationY}
           size={c.size}

@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
+import * as THREE from "three";
+import { Html } from "@react-three/drei";
 import { useDesigner } from "@/store/useStore";
 import type { CabinetRun, Wall } from "@/store/useStore";
 import { getThemeMaterials } from "./CabinetModel";
@@ -19,12 +21,38 @@ import {
   BaseCabinetRun,
   WallCabinetRun,
 } from "./CabinetLayoutEngine";
+import { runBlockedSegmentsWithCorners } from "@/lib/planning/adapters";
+import { deriveEndPanels } from "@/lib/planning/endPanels";
+import { EndPanel3D } from "./EndPanel3D";
+import { registerObject } from "@/lib/three/measureRegistry";
+import type { IntervalMm } from "@/lib/planning/types";
 import { dist } from "@/lib/geometry";
 import type { Vec2 } from "@/lib/geometry";
 
 export function ProceduralCabinetRow() {
   const runs = useDesigner((s) => s.cabinets);
   const walls = useDesigner((s) => s.walls);
+  const placedCutouts = useDesigner((s) => s.placedCutouts);
+  const activeCabinetId = useDesigner((s) => s.activeCabinetId);
+
+  // Phase 2: cross-run corner ownership + Phase 1 cutout projections, computed
+  // once per state change so every committed run shares the same intervals.
+  const cornerBlocked = useMemo(
+    () => runBlockedSegmentsWithCorners(runs, walls, placedCutouts),
+    [runs, walls, placedCutouts]
+  );
+
+  // Phase 4D: derived end panels for COMMITTED runs only (the active ghost is
+  // excluded so drawing never produces panels). Recomputed on structural change.
+  const endPanels = useMemo(
+    () =>
+      deriveEndPanels(
+        runs.filter((run) => run.id !== activeCabinetId),
+        walls,
+        { cutouts: placedCutouts }
+      ),
+    [runs, walls, placedCutouts, activeCabinetId]
+  );
 
   // Escape cancels the active cabinet baseline: discards the preview and
   // clears the active drawing points, staying in Cabinet mode so a new run
@@ -50,15 +78,44 @@ export function ProceduralCabinetRow() {
 
   return (
     <>
-      {runs.map((run) => (
-        <CabinetRunMesh key={run.id} run={run} walls={walls} />
-      ))}
+      {/* Phase 2 ghost→real: the ACTIVE run is rendered only as a translucent
+          ghost (ActiveCabinetPreview); committed runs render solid here. */}
+      {runs
+        .filter((run) => run.id !== activeCabinetId)
+        .map((run) => (
+          <CabinetRunMesh
+            key={run.id}
+            run={run}
+            walls={walls}
+            blocked={cornerBlocked.runs[run.id]}
+          />
+        ))}
+
+      {/* Phase 4D: finished end panels at exposed committed run ends. */}
+      {endPanels
+        .filter((p) => p.reason === "exposed")
+        .map((p) => (
+          <EndPanel3D
+            key={p.id}
+            plan={p}
+            customMaterialId={runs.find((r) => r.id === p.runId)?.customMaterialId}
+          />
+        ))}
+
       <ActiveCabinetPreview />
     </>
   );
 }
 
-function CabinetRunMesh({ run, walls }: { run: CabinetRun; walls: Wall[] }) {
+function CabinetRunMesh({
+  run,
+  walls,
+  blocked,
+}: {
+  run: CabinetRun;
+  walls: Wall[];
+  blocked: { base: IntervalMm[][]; top: IntervalMm[][] };
+}) {
   const selectCabinet = useDesigner((s) => s.selectCabinet);
   const selectedCabinetId = useDesigner((s) => s.selectedCabinetId);
   const tool = useDesigner((s) => s.tool);
@@ -66,8 +123,8 @@ function CabinetRunMesh({ run, walls }: { run: CabinetRun; walls: Wall[] }) {
 
   const isIsland = useMemo(() => !touchesAnyWall(run, walls), [run, walls]);
   const layout = useMemo(
-    () => planRunLayout(run.points, isIsland),
-    [run.points, isIsland]
+    () => planRunLayout(run.points, isIsland, blocked.base, blocked.top),
+    [run.points, isIsland, blocked]
   );
 
   const baseHeight = run.baseHeight ?? BASE_HEIGHT;
@@ -83,6 +140,14 @@ function CabinetRunMesh({ run, walls }: { run: CabinetRun; walls: Wall[] }) {
     }
   };
 
+  // Phase 3: register each committed module root for on-demand measurement.
+  const handleModuleRef = useCallback(
+    (layer: "base" | "wall" | "corner", index: number, obj: THREE.Object3D | null) => {
+      registerObject(`${run.id}#${layer}#${index}`, obj);
+    },
+    [run.id]
+  );
+
   return (
     <group onClick={handleClick}>
       {/* Solid modular base cabinets + seamless countertop (from the engine). */}
@@ -91,6 +156,8 @@ function CabinetRunMesh({ run, walls }: { run: CabinetRun; walls: Wall[] }) {
         isIsland={isIsland}
         baseHeight={baseHeight}
         customMaterialId={customMaterialId}
+        blockedBySegment={blocked.base}
+        onModuleRef={handleModuleRef}
       />
 
       {/* Modern upper wall cabinets, synced over the base modules. */}
@@ -100,6 +167,9 @@ function CabinetRunMesh({ run, walls }: { run: CabinetRun; walls: Wall[] }) {
         wallHeight={wallHeight}
         wallElevation={wallElevation}
         customMaterialId={customMaterialId}
+        blockedBySegment={blocked.base}
+        blockedBySegmentTop={blocked.top}
+        onModuleRef={handleModuleRef}
       />
 
       {/* Waterfall edges on the free slab ends of island runs. */}
@@ -188,9 +258,11 @@ function ActiveCabinetPreview() {
   const cabinets = useDesigner((s) => s.cabinets);
   const pending = useDesigner((s) => s.pending);
   const walls = useDesigner((s) => s.walls);
+  const placedCutouts = useDesigner((s) => s.placedCutouts);
   const typedLength = useDesigner((s) => s.typedLength);
   const lockedVector = useDesigner((s) => s.lockedVector);
   const cameraMode = useDesigner((s) => s.cameraMode);
+  const lastValidation = useDesigner((s) => s.lastValidation);
 
   if (!activeId) return null;
   const run = cabinets.find((c) => c.id === activeId);
@@ -205,16 +277,32 @@ function ActiveCabinetPreview() {
     typedValid && lockedVector
       ? { x: last.x + lockedVector.x * L, z: last.z + lockedVector.z * L }
       : pending;
-  if (!effEnd) return null;
-  if (dist(last, effEnd) < 1e-4 && !typedValid) return null;
 
-  const previewRun: CabinetRun = { ...run, points: [...run.points, effEnd] };
+  // Ghost→real: the whole active run renders translucent until committed. Even
+  // with no hover extension we still show the already-placed points so the
+  // partial run is never invisible.
+  const hasExtension = !!effEnd && dist(last, effEnd) >= 1e-4;
+  const points: Vec2[] = hasExtension ? [...run.points, effEnd!] : run.points;
+  if (points.length < 2) return null;
+
+  const previewRun: CabinetRun = { ...run, points };
   const isIsland = !touchesAnyWall(previewRun, walls);
-  const layout = planRunLayout(previewRun.points, isIsland);
+  const previewBlocked = runBlockedSegmentsWithCorners(
+    [previewRun, ...cabinets.filter((c) => c.id !== activeId)],
+    walls,
+    placedCutouts
+  );
+  const preview = previewBlocked.runs[activeId];
+  const layout = planRunLayout(
+    previewRun.points,
+    isIsland,
+    preview?.base ?? [],
+    preview?.top ?? []
+  );
 
   return (
     <group>
-      {cameraMode === "3d" && <PreviewLine points={[...run.points, effEnd]} />}
+      {hasExtension && cameraMode === "3d" && <PreviewLine points={points} />}
       {cameraMode === "3d" &&
         layout.base.map((p, i) => (
           <GhostCabinet
@@ -253,6 +341,16 @@ function ActiveCabinetPreview() {
             color="#fbbf24"
           />
         ))}
+
+      {/* Minimal, non-layout-changing hint when a commit was blocked. */}
+      {lastValidation && !lastValidation.valid && cameraMode === "3d" && (
+        <Html position={[last.x, 1.4, last.z]} center zIndexRange={[40, 0]} style={{ pointerEvents: "none" }}>
+          <div className="pointer-events-none rounded-md border border-rose-400/40 bg-rose-950/90 px-2 py-1 text-[10px] font-semibold text-rose-200 shadow-lg backdrop-blur-sm">
+            Corner conflict — adjust or cancel
+          </div>
+        </Html>
+      )}
+
       <DimensionOverlay a={last} />
     </group>
   );

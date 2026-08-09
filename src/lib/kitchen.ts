@@ -1,5 +1,5 @@
-import type { Vec2 } from "./geometry";
-import { distToSegment, segmentsOf } from "./geometry";
+import type { Vec2 } from "./geometry.ts";
+import { distToSegment, segmentsOf } from "./geometry.ts";
 import type { Wall } from "@/store/useStore";
 
 export interface Placement {
@@ -42,6 +42,9 @@ export const WALL_CABINET_ELEVATION = 1.5;
 /** Dedicated upper L-corner blind unit footprint (0.65 m x 0.65 m). */
 export const UPPER_CORNER_MODULE_SIZE = 0.65;
 export const FILLER_MIN_WIDTH = 0.05;
+
+/** Finished end-panel thickness (18 mm), matching the reference PANEL_THK_MM. */
+export const END_PANEL_THICKNESS = 0.018;
 
 /**
  * Plans all cabinet layers (base, wall, filler) plus the countertop slab for a

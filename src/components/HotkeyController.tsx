@@ -91,7 +91,7 @@ export function HotkeyController() {
           }
           break;
         case "Enter":
-          s.finishActive();
+          s.finishDrawing();
           break;
       }
     };

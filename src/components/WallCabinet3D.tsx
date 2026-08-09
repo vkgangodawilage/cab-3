@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type Ref } from "react";
 import * as THREE from "three";
 import { useDesigner } from "@/store/useStore";
 import { getThemeMaterials } from "./CabinetModel";
@@ -50,6 +50,7 @@ export function WallCabinet3D({
   variant = "solid",
   customMaterialId,
   soffit = 0,
+  innerRef,
 }: {
   position: [number, number, number];
   rotationY?: number;
@@ -59,6 +60,8 @@ export function WallCabinet3D({
   variant?: WallCabinetVariant;
   customMaterialId?: string;
   soffit?: number;
+  /** Optional ref to this module's root group (Phase 3 measurement). */
+  innerRef?: Ref<THREE.Group>;
 }) {
   const theme = useDesigner((s) => s.theme);
 
@@ -79,7 +82,7 @@ export function WallCabinet3D({
   }, [theme, customMaterialId]);
 
   return (
-    <group position={position} rotation={[0, rotationY, 0]}>
+    <group ref={innerRef} position={position} rotation={[0, rotationY, 0]}>
       {/* Enclosed carcass box */}
       <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
         <boxGeometry args={[width, height, depth]} />
@@ -214,6 +217,7 @@ export function UpperCornerCabinet3D({
   height = WALL_CABINET_HEIGHT,
   customMaterialId,
   soffit = 0,
+  innerRef,
 }: {
   position: [number, number, number];
   rotationY?: number;
@@ -221,6 +225,8 @@ export function UpperCornerCabinet3D({
   height?: number;
   customMaterialId?: string;
   soffit?: number;
+  /** Optional ref to this module's root group (Phase 3 measurement). */
+  innerRef?: Ref<THREE.Group>;
 }) {
   const theme = useDesigner((s) => s.theme);
 
@@ -263,7 +269,7 @@ export function UpperCornerCabinet3D({
   const doorRotY = (Math.PI * 3) / 4; // chamfer normal faces the room (+, -)
 
   return (
-    <group position={position} rotation={[0, rotationY, 0]}>
+    <group ref={innerRef} position={position} rotation={[0, rotationY, 0]}>
       {/* Solid chamfered carcass anchored at the group bottom [0, height] */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]} castShadow receiveShadow>
         <extrudeGeometry args={[shape, { depth: height, bevelEnabled: false }]} />

@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "test": "node --test src/lib/planning/intervals.test.ts src/lib/planning/rhythmSolver.test.ts src/lib/planning/adapters.test.ts src/lib/planning/cornerOwnership.test.ts src/lib/planning/ghostModel.test.ts src/lib/planning/planVerification.test.ts src/lib/planning/planVerificationPlaced.test.ts src/lib/planning/planVerificationRunOverlap.test.ts src/lib/planning/planVerificationEndPanels.test.ts src/lib/planning/endPanels.test.ts src/lib/three/measureGeometry.test.ts src/lib/three/verifyScheduler.test.ts",
     "generate:models": "node scripts/generate-models.mjs"
   },
   "dependencies": {

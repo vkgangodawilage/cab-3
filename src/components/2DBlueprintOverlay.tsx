@@ -5,6 +5,8 @@ import * as THREE from "three";
 import { useDesigner } from "@/store/useStore";
 import { touchesAnyWall, WALL_CABINET_DEPTH } from "@/lib/kitchen";
 import { planRunLayout } from "./CabinetLayoutEngine";
+import { runBlockedSegmentsWithCorners } from "@/lib/planning/adapters";
+import { deriveEndPanels } from "@/lib/planning/endPanels";
 import { dist } from "@/lib/geometry";
 
 const Y = 2.9; // just above wall tops so it overlays the 2D plan
@@ -89,15 +91,18 @@ export function BlueprintOverlay2D() {
   const mode = useDesigner((s) => s.cameraMode);
   const walls = useDesigner((s) => s.walls);
   const cabinets = useDesigner((s) => s.cabinets);
+  const placedCutouts = useDesigner((s) => s.placedCutouts);
 
   const { solid, dashed } = useMemo(() => {
     const solid: number[] = [];
     const dashed: number[] = [];
     if (mode !== "2d") return { solid, dashed };
 
+    const cornerBlocked = runBlockedSegmentsWithCorners(cabinets, walls, placedCutouts);
     for (const run of cabinets) {
       const isIsland = !touchesAnyWall(run, walls);
-      const layout = planRunLayout(run.points, isIsland);
+      const blocked = cornerBlocked.runs[run.id];
+      const layout = planRunLayout(run.points, isIsland, blocked?.base ?? [], blocked?.top ?? []);
       for (const m of layout.base) {
         pushRect(solid, m.x, m.z, m.rotationY, m.width, m.depth);
       }
@@ -116,8 +121,13 @@ export function BlueprintOverlay2D() {
         }
       }
     }
+    // Phase 4D: finished end panels as thin solid rects at exposed run ends.
+    for (const p of deriveEndPanels(cabinets, walls, { cutouts: placedCutouts })) {
+      if (p.reason !== "exposed") continue;
+      pushRect(solid, p.position[0], p.position[2], p.rotationY, p.thicknessM, p.depthM);
+    }
     return { solid, dashed };
-  }, [mode, walls, cabinets]);
+  }, [mode, walls, cabinets, placedCutouts]);
 
   const solidGeo = useMemo(() => buildLineGeometry(solid), [solid]);
   const dashedGeo = useMemo(() => buildLineGeometry(dashed), [dashed]);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, type Ref } from "react";
 import * as THREE from "three";
 import { useDesigner } from "@/store/useStore";
 import { getThemeMaterials } from "./CabinetModel";
@@ -53,6 +53,7 @@ export function BaseCabinet3D({
   height = BASE_HEIGHT,
   variant = "double-door",
   customMaterialId,
+  innerRef,
 }: {
   position: [number, number, number];
   rotationY?: number;
@@ -61,6 +62,8 @@ export function BaseCabinet3D({
   height?: number;
   variant?: BaseCabinetVariant;
   customMaterialId?: string;
+  /** Optional ref to this module's root group (Phase 3 measurement). */
+  innerRef?: Ref<THREE.Group>;
 }) {
   const theme = useDesigner((s) => s.theme);
 
@@ -78,7 +81,7 @@ export function BaseCabinet3D({
   const boxY = TOE_KICK_HEIGHT + boxHeight / 2;
 
   return (
-    <group position={position} rotation={[0, rotationY, 0]}>
+    <group ref={innerRef} position={position} rotation={[0, rotationY, 0]}>
       {variant === "l-corner" ? (
         <LCornerUnit kit={kit} boxY={boxY} boxHeight={boxHeight} />
       ) : (

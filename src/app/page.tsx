@@ -7,6 +7,7 @@ import { HotkeyController } from "@/components/HotkeyController";
 import { PantryCatalogUI } from "@/components/PantryCatalogUI";
 import { PantryInspectorUI } from "@/components/PantryInspectorUI";
 import { BOMModal } from "@/components/BOMModal";
+import { AutoVerify } from "@/components/AutoVerify";
 
 export default function Home() {
   return (
@@ -21,6 +22,7 @@ export default function Home() {
       <PantryCatalogUI />
       <PantryInspectorUI />
       <BOMModal />
+      <AutoVerify />
     </main>
   );
 }

@@ -1,13 +1,15 @@
 "use client";
 
 import { Fragment, useEffect, useMemo } from "react";
-import { Calculator, FileDown, Receipt, X } from "lucide-react";
+import { Calculator, FileDown, Receipt, ShieldCheck, X } from "lucide-react";
 import { useDesigner } from "@/store/useStore";
+import { runVerification } from "@/lib/three/verifyScene";
 import {
   computeCostEstimate,
   formatCurrency,
 } from "@/utils/costCalculator";
 import type { BOMLine, CountertopFinish } from "@/utils/costCalculator";
+import type { VerifyStatus } from "@/lib/planning/planVerification";
 
 /**
  * Slide-over BOM drawer. Renders a live itemized estimate that re-computes on
@@ -24,6 +26,10 @@ export function BOMModal() {
   const cabinets = useDesigner((s) => s.cabinets);
   const placedItems = useDesigner((s) => s.placedItems);
   const placedCutouts = useDesigner((s) => s.placedCutouts);
+  const verification = useDesigner((s) => s.verification);
+  const setVerification = useDesigner((s) => s.setVerification);
+  const verificationStale = useDesigner((s) => s.verificationStale);
+  const setVerificationStale = useDesigner((s) => s.setVerificationStale);
 
   const estimate = useMemo(
     () =>
@@ -67,6 +73,26 @@ export function BOMModal() {
       summary: estimate.summary,
       projectId,
     });
+  };
+
+  // Phase 3/4: on-demand plan-vs-built verification (observational only).
+  const handleVerify = () => {
+    const s = useDesigner.getState();
+    const result = runVerification({
+      runs: s.cabinets,
+      walls: s.walls,
+      placedCutouts: s.placedCutouts,
+      placedItems: s.placedItems,
+      activeCabinetId: s.activeCabinetId,
+    });
+    setVerification(result);
+    setVerificationStale(false);
+  };
+
+  const statusColor: Record<VerifyStatus, string> = {
+    PASS: "text-emerald-300",
+    WARNING: "text-amber-300",
+    ERROR: "text-rose-300",
   };
 
   if (!bomOpen) return null;
@@ -230,6 +256,61 @@ export function BOMModal() {
               {formatCurrency(estimate.summary.grandTotal)}
             </span>
           </div>
+        </div>
+
+        {/* Plan verification (Phase 3, on-demand) */}
+        <div className="border-t border-white/10 px-5 py-3">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              <ShieldCheck size={12} className="text-cyan-300" /> Plan Verification
+              {verificationStale && (
+                <span className="normal-case tracking-normal text-slate-500">· refreshing…</span>
+              )}
+            </span>
+            <button
+              onClick={handleVerify}
+              className="rounded-lg border border-cyan-400/40 bg-cyan-500/10 px-3 py-1 text-[11px] font-semibold text-cyan-300 transition-colors hover:bg-cyan-500/20"
+            >
+              Verify Plan
+            </button>
+          </div>
+          {verification && (
+            <div className="mt-2 space-y-1 text-[11px]">
+              <div className={`flex items-center gap-1.5 font-semibold ${statusColor[verification.overall]}`}>
+                Overall: {verification.overall}
+              </div>
+              <div className="text-slate-400">
+                {verification.moduleCount} run modules · {verification.passed} PASS · {verification.warnings} WARNING · {verification.errors} ERROR
+              </div>
+              {verification.placedCount > 0 && (
+                <div className="text-slate-400">
+                  Placed items · {verification.placedPassed} PASS · {verification.placedWarnings} WARNING · {verification.placedErrors} ERROR
+                </div>
+              )}
+              {verification.endPanelCount > 0 && (
+                <div className="text-slate-400">
+                  End panels · {verification.endPanelPassed} PASS · {verification.endPanelWarnings} WARNING · {verification.endPanelErrors} ERROR
+                </div>
+              )}
+              {verification.overlapViolations.length > 0 && (
+                <div className="text-rose-300/90">
+                  Overlap · {verification.overlapViolations.length} error{verification.overlapViolations.length > 1 ? "s" : ""}
+                </div>
+              )}
+              {verification.issues.length === 0 ? (
+                <div className="text-emerald-300/90">All modules match the plan within tolerance.</div>
+              ) : (
+                <ul className="max-h-28 space-y-0.5 overflow-y-auto pr-1">
+                  {verification.issues.slice(0, 15).map((issue, i) => (
+                    <li key={i} className="text-rose-300/90">{issue}</li>
+                  ))}
+                  {verification.issues.length > 15 && (
+                    <li className="text-slate-500">…and {verification.issues.length - 15} more</li>
+                  )}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Actions */}

@@ -18,6 +18,8 @@
 import type { Wall, CabinetRun, PlacedItem, PlacedCutout } from "@/store/useStore";
 import { touchesAnyWall } from "@/lib/kitchen";
 import { planRunLayout } from "@/components/CabinetLayoutEngine";
+import { runBlockedSegmentsWithCorners } from "@/lib/planning/adapters";
+import { deriveEndPanels } from "@/lib/planning/endPanels";
 import { getCatalogItem } from "@/lib/catalog";
 
 export type CountertopFinish = "standard" | "marble" | "granite";
@@ -47,6 +49,7 @@ export interface PricingConfig {
   handlePerUnit: number;
   plinthPerMeter: number;
   ledPerMeter: number;
+  endPanelPerUnit: number;
   countertopFinishMultiplier: Record<CountertopFinish, number>;
 }
 
@@ -62,6 +65,7 @@ export const DEFAULT_PRICING: PricingConfig = {
   handlePerUnit: 15,
   plinthPerMeter: 30,
   ledPerMeter: 40,
+  endPanelPerUnit: 0,
   countertopFinishMultiplier: { standard: 1.0, marble: 1.2, granite: 1.1 },
 };
 
@@ -154,9 +158,11 @@ export function computeCostEstimate(
   let counterSqm = 0;
 
   // ---- Run-based cabinet systems (parametric subdivision) ----------------
+  const cornerBlocked = runBlockedSegmentsWithCorners(cabinets, walls, placedCutouts);
   for (const run of cabinets) {
     const isIsland = !touchesAnyWall(run, walls);
-    const layout = planRunLayout(run.points, isIsland);
+    const blocked = cornerBlocked.runs[run.id];
+    const layout = planRunLayout(run.points, isIsland, blocked?.base ?? [], blocked?.top ?? []);
     for (const m of layout.base) baseWidths.push(m.width);
     for (const w of layout.wall) wallWidths.push(w.width);
     for (const wc of layout.wallCorners) wallWidths.push(wc.size);
@@ -183,6 +189,11 @@ export function computeCostEstimate(
     if (cutout.type === "door") doorCount += 1;
     else windowCount += 1;
   }
+
+  // ---- Finished end panels (Phase 4D, derived from committed runs) --------
+  const endPanelCount = deriveEndPanels(cabinets, walls, { cutouts: placedCutouts }).filter(
+    (p) => p.reason === "exposed"
+  ).length;
 
   const baseUnits = baseWidths.length;
   const wallUnits = wallWidths.length;
@@ -313,6 +324,17 @@ export function computeCostEstimate(
       wallMeters,
       "m",
       pricing.ledPerMeter
+    );
+  }
+  if (endPanelCount > 0) {
+    addLine(
+      "end-panels",
+      "End Panels",
+      "Finished End Panels",
+      `${endPanelCount} panels · 18mm`,
+      endPanelCount,
+      "panel",
+      pricing.endPanelPerUnit
     );
   }
 
