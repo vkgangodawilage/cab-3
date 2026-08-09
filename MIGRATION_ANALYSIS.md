@@ -260,7 +260,7 @@ Safe ordering rationale: pure-math first (reversible, testable), then renderer-a
 | SketchUp assumptions leaking in | `Placement` structs use wall_id + start_mm; current uses world position + rotation | Map `PlacedItem` to a `<wallId>#<index>`-anchored placement (already exists via `placement.ts`) |
 
 ---
-
+jjj
 # FINAL RESULT
 
 ## RECOMMENDED MIGRATION
