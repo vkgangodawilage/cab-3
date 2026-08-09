@@ -1,0 +1,35 @@
+============================================
+  Procedural Kitchen and Room Designer
+============================================
+
+[1/3] Installing dependencies - first run or incomplete install
+
+
+added 1 package, and removed 1 package in 811ms
+
+
+[2/3] Starting the development server on http://localhost:3001 ...
+[3/3] Opening your browser in a few seconds...
+
+Press Ctrl+C in this window to stop the server.
+
+
+> procedural-kitchen-designer@1.0.0 dev
+> next dev -p 3001
+
+  ▲ Next.js 14.2.5
+  - Local:        http://localhost:3001
+
+ ✓ Starting...
+ ✓ Ready in 1548ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.3s (1661 modules)
+ GET / 200 in 4624ms
+ ○ Compiling /_not-found ...
+ ✓ Compiled /_not-found in 2.5s (1650 modules)
+ GET /meta.json 404 in 2443ms
+ GET /meta.json 404 in 1574ms
+ GET /meta.json 404 in 28ms
+ GET /meta.json 404 in 72ms
+ GET /meta.json 404 in 49ms
+ GET / 200 in 94ms
